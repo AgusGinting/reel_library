@@ -1,0 +1,16 @@
+# Tahap 1-2: kumpulkan & unduh
+playwright==1.63.0
+yt-dlp==2026.8.19
+curl_cffi==0.16.3            # dianjurkan yt-dlp untuk TikTok (mengurangi blokir HTTP 403)
+
+# Tahap 3: transkrip (GPU NVIDIA; paket nvidia-* menyediakan DLL CUDA di Windows)
+faster-whisper==1.2.1
+av==18.1.0
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-cudnn-cu12==9.27.0.42
+
+# Tahap 3b-4: Claude API & web
+anthropic==1.13.0
+Flask==3.1.3

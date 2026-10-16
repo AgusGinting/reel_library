@@ -1,0 +1,36 @@
+# --- RAHASIA: akses ke akun Instagram & API key (jangan pernah di-commit) ---
+.env
+.env.*
+cookies.txt
+browser_profile/
+
+# --- Data pribadi perpustakaan (isi DM, video, transkrip) ---
+data/
+library.db
+library.db-wal
+library.db-shm
+library.db-journal
+captured_reels.csv
+reels.csv
+reels.tmp
+diagnostic_report.txt
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# --- Frontend (dipasang ulang: npm install; dibuat ulang: npm run build) ---
+frontend/node_modules/
+frontend/dist/
+
+# --- Sisa debug & editor/OS ---
+_wdbg*.py
+*.log
+.claude/settings.local.json
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
