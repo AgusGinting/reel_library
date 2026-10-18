@@ -6,8 +6,12 @@ Menyediakan:
   /api/reels/<sc>        detail satu item + daftar media (video / slide)
   /media/<sc>/<file>     file video/gambar (mendukung Range -> video bisa di-seek)
   /api/chat              tanya jawab AI (Server-Sent Events, jawaban mengalir)
+  /api/chats[/<id>]      riwayat percakapan (daftar, buka, hapus)
+  /api/models            model chat yang bisa dipilih (Claude / Ollama) + ketersediaannya
   /api/add               tambah link manual -> diproses di latar belakang
   /api/jobs/<id>         progres penambahan link
+  /api/pending, /api/retry   item yang belum selesai + proses ulang (unduhan gagal)
+  /api/instagram[/login] status sesi Instagram + buka jendela login
   /                      hasil build frontend (frontend/dist)
 
 Jalankan:
@@ -17,6 +21,8 @@ Jalankan:
 import json
 import queue
 import re
+import subprocess
+import sys
 import threading
 import uuid
 
@@ -24,10 +30,12 @@ import anthropic
 from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
 import db
+import download
 import links
+import ollama_chat
 import pipeline
-from ask import Librarian
-from config import BASE, DATA, has_api_key
+from ask import claude_librarian
+from config import BASE, CHAT_MODELS, DATA, DEFAULT_CHAT_MODEL, has_api_key
 from links import SC_RE
 
 DIST = BASE / "frontend" / "dist"
@@ -174,12 +182,155 @@ def media(sc, name):
 
 # --- Chat AI (Server-Sent Events) ---------------------------------------
 
-_sessions = {}           # conversation_id -> Librarian (riwayat percakapan)
+_sessions = {}           # conversation_id -> Librarian aktif (riwayat lengkap tersimpan di DB)
 _sessions_lock = threading.Lock()
 
 
 def sse(event, data):
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _public_refs(refs):
+    return {k: {"shortcode": v["shortcode"], "title": v["title"]} for k, v in refs.items()}
+
+
+MODELS = {m["id"]: m for m in CHAT_MODELS}
+
+
+def _ollama_name(name):
+    return name if ":" in name.split("/")[-1] else f"{name}:latest"
+
+
+def _model_status(model):
+    """(tersedia?, alasan bila tidak). Ollama dicek sekali per panggilan /api/models."""
+    if model["provider"] == "anthropic":
+        return (True, None) if has_api_key(quiet=True) else (False, "API key Claude belum diatur (.env)")
+    installed = ollama_chat.installed_models()
+    if installed is None:
+        return False, "Ollama tidak berjalan — buka aplikasi Ollama"
+    if _ollama_name(model["model"]) not in installed:
+        return False, f"Belum di-pull: jalankan  ollama pull {model['model']}"
+    return True, None
+
+
+def _new_librarian(model_id, refs=None, history=None):
+    model = MODELS[model_id]
+    if model["provider"] == "anthropic":
+        return claude_librarian(model_id, refs=refs, history=history)
+    return ollama_chat.OllamaLibrarian(model["model"], model_id=model_id,
+                                       refs=refs, history=history)
+
+
+def _get_session(cid, model_id):
+    """Librarian untuk percakapan `cid` dengan model `model_id`: dari memori,
+    dipulihkan dari riwayat tersimpan (server restart, percakapan lama dibuka, atau
+    model diganti di tengah percakapan), atau percakapan baru."""
+    with _sessions_lock:
+        lib = _sessions.get(cid)
+        busy = lib is not None and lib.lock.locked()   # jangan ganti saat masih menjawab
+        if lib is None or (lib.model_id != model_id and not busy):
+            saved = db.get_chat(cid) if cid else None
+            if saved:
+                lib = _new_librarian(model_id, refs=saved["refs"], history=saved["messages"])
+            else:
+                cid = cid or uuid.uuid4().hex
+                lib = _new_librarian(model_id)
+            lib.lock = threading.Lock()
+            _sessions[cid] = lib
+        return lib, cid
+
+
+class _Turn:
+    """Satu jawaban yang sedang dibuat; bisa ditonton oleh beberapa stream SSE."""
+
+    def __init__(self, question):
+        self.question = question
+        self.chunks = []
+        self.final = None            # ("done"|"error", data) setelah selesai
+        self.cond = threading.Condition()
+
+    @property
+    def text(self):
+        return "".join(self.chunks)
+
+    def push(self, chunk):
+        with self.cond:
+            self.chunks.append(chunk)
+            self.cond.notify_all()
+
+    def finish(self, event, data):
+        with self.cond:
+            self.final = (event, data)
+            self.cond.notify_all()
+
+    def wait(self, sent):
+        """Tunggu potongan baru setelah indeks `sent`; kembalikan (potongan, final)."""
+        with self.cond:
+            while len(self.chunks) <= sent and not self.final:
+                self.cond.wait()
+            return self.chunks[sent:], self.final
+
+
+def _answer(lib, cid, turn):
+    try:
+        for text in lib.stream(turn.question):
+            turn.push(text)
+        u = lib.usage
+        sources = [{"ref": ref, **lib.refs[ref]} for ref in lib.cited]
+        usage = {"input": u.input_tokens, "output": u.output_tokens,
+                 "cache_read": u.cache_read_input_tokens or 0,
+                 "cache_write": u.cache_creation_input_tokens or 0}
+        db.add_chat_turn(cid, turn.question, lib.answer, sources, usage, lib.refs,
+                         model=lib.model_id)
+        turn.finish("done", {"sources": sources, "usage": usage, "model": lib.model_id})
+    except anthropic.AuthenticationError:
+        turn.finish("error", {"message": "API key tidak valid. Periksa file .env."})
+    except anthropic.APIError as exc:
+        turn.finish("error", {"message": f"Gagal menghubungi Claude: {exc}"})
+    except Exception as exc:   # OllamaError, jaringan, dll.
+        turn.finish("error", {"message": str(exc) or repr(exc)})
+    finally:
+        lib.pending = None
+        lib.lock.release()
+
+
+@app.get("/api/models")
+def models():
+    out = []
+    for m in CHAT_MODELS:
+        ok, why = _model_status(m)
+        out.append({"id": m["id"], "label": m["label"], "note": m["note"],
+                    "provider": m["provider"], "available": ok, "reason": why})
+    return jsonify({"models": out, "default": DEFAULT_CHAT_MODEL})
+
+
+@app.get("/api/chats")
+def chats():
+    return jsonify(db.list_chats())
+
+
+@app.get("/api/chats/<cid>")
+def chat_detail(cid):
+    saved = db.get_chat(cid)
+    lib = _sessions.get(cid)
+    turn = getattr(lib, "pending", None)
+    if not saved and not turn:
+        abort(404)
+    if not saved:   # pertanyaan pertama masih dijawab, belum tersimpan
+        saved = {"id": cid, "title": turn.question, "messages": [], "refs": lib.refs}
+    saved["refs"] = _public_refs(saved["refs"])
+    # Jawaban yang masih dibuat (mis. halaman di-refresh/pindah tab di tengah jawaban).
+    saved["pending"] = {"question": turn.question, "text": turn.text} if turn else None
+    return jsonify(saved)
+
+
+@app.delete("/api/chats/<cid>")
+def chat_delete(cid):
+    with _sessions_lock:
+        _sessions.pop(cid, None)
+    if not db.delete_chat(cid):
+        abort(404)
+    return "", 204
 
 
 @app.post("/api/chat")
@@ -188,40 +339,35 @@ def chat():
     question = (body.get("question") or "").strip()
     if not question:
         return jsonify({"error": "Pertanyaan kosong."}), 400
-    if not has_api_key(quiet=True):
-        return jsonify({"error": "API key Claude belum diatur (file .env)."}), 503
+    model_id = body.get("model") or DEFAULT_CHAT_MODEL
+    if model_id not in MODELS:
+        return jsonify({"error": f"Model tidak dikenal: {model_id}"}), 400
+    ok, why = _model_status(MODELS[model_id])
+    if not ok:
+        return jsonify({"error": why}), 503
 
-    with _sessions_lock:
-        cid = body.get("conversation_id")
-        lib = _sessions.get(cid)
-        if lib is None:
-            cid = uuid.uuid4().hex
-            lib = _sessions[cid] = Librarian()
-            lib.lock = threading.Lock()
+    lib, cid = _get_session(body.get("conversation_id"), model_id)
+    if not lib.lock.acquire(blocking=False):
+        return jsonify({"error": "Masih menjawab pertanyaan sebelumnya."}), 409
+
+    # Jawaban dibuat di thread terpisah sampai selesai & disimpan, walau browser
+    # terputus (tab di-refresh, dibekukan, atau ditutup). Stream SSE hanya "menonton".
+    turn = _Turn(question)
+    lib.pending = turn
+    threading.Thread(target=_answer, args=(lib, cid, turn), daemon=True).start()
 
     def generate():
         # refs: id pendek di jawaban (R12) -> reel, supaya rujukan bisa diklik saat mengalir.
-        refs = {k: {"shortcode": v["shortcode"], "title": v["title"]} for k, v in lib.refs.items()}
-        yield sse("meta", {"conversation_id": cid, "refs": refs})
-        if not lib.lock.acquire(blocking=False):
-            yield sse("error", {"message": "Masih menjawab pertanyaan sebelumnya."})
-            return
-        try:
-            for text in lib.stream(question):
+        yield sse("meta", {"conversation_id": cid, "refs": _public_refs(lib.refs)})
+        sent = 0
+        while True:
+            chunks, final = turn.wait(sent)
+            for text in chunks:
                 yield sse("text", {"text": text})
-            u = lib.usage
-            yield sse("done", {
-                "sources": [{"ref": ref, **lib.refs[ref]} for ref in lib.cited],
-                "usage": {"input": u.input_tokens, "output": u.output_tokens,
-                          "cache_read": u.cache_read_input_tokens or 0,
-                          "cache_write": u.cache_creation_input_tokens or 0},
-            })
-        except anthropic.AuthenticationError:
-            yield sse("error", {"message": "API key tidak valid. Periksa file .env."})
-        except anthropic.APIError as exc:
-            yield sse("error", {"message": f"Gagal menghubungi Claude: {exc}"})
-        finally:
-            lib.lock.release()
+            sent += len(chunks)
+            if final:
+                yield sse(*final)
+                return
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -298,16 +444,9 @@ def _work():
                 job["done"] = True
 
 
-@app.post("/api/add")
-def add_links():
+def _enqueue(items):
+    """Buat job baru dari item {input, shortcode, url} dan masukkan ke antrean."""
     global _worker
-    body = request.get_json(silent=True) or {}
-    items = links.parse_links(body.get("text", ""))
-    if not items:
-        return jsonify({"error": "Tidak ada link yang dikenali. Tempel link yang diawali https://"}), 400
-    if len(items) > 50:
-        return jsonify({"error": "Maksimal 50 link sekali tambah."}), 400
-
     job = {"id": uuid.uuid4().hex, "done": False,
            "items": [{**it, "stage": "queued", "message": None, "title": None} for it in items]}
     with _jobs_lock:
@@ -316,7 +455,73 @@ def add_links():
             _worker = threading.Thread(target=_work, daemon=True)
             _worker.start()
     _job_queue.put(job)
-    return jsonify(_job_view(job)), 202
+    return job
+
+
+def _active_shortcodes():
+    with _jobs_lock:
+        return {it["shortcode"] for job in _jobs.values() if not job["done"]
+                for it in job["items"] if it["shortcode"]}
+
+
+@app.post("/api/add")
+def add_links():
+    body = request.get_json(silent=True) or {}
+    items = links.parse_links(body.get("text", ""))
+    if not items:
+        return jsonify({"error": "Tidak ada link yang dikenali. Tempel link yang diawali https://"}), 400
+    if len(items) > 50:
+        return jsonify({"error": "Maksimal 50 link sekali tambah."}), 400
+    return jsonify(_job_view(_enqueue(items))), 202
+
+
+@app.get("/api/pending")
+def pending():
+    """Item yang belum selesai diproses (mis. unduhan gagal) — bisa dicoba lagi."""
+    active = _active_shortcodes()
+    conn = db.connect()
+    rows = conn.execute("SELECT * FROM reels WHERE status != 'processed' "
+                        "ORDER BY first_seen DESC").fetchall()
+    conn.close()
+    return jsonify([{"shortcode": r["shortcode"], "url": r["url"], "status": r["status"],
+                     "title": fallback_title(r) if (r["caption"] or r["screen_text"]) else r["url"],
+                     "running": r["shortcode"] in active} for r in rows])
+
+
+@app.post("/api/retry")
+def retry():
+    """Proses ulang item yang belum selesai: {"shortcodes": [...]} (dilanjutkan dari
+    tahap terakhirnya, mis. unduhan yang gagal diulang)."""
+    codes = (request.get_json(silent=True) or {}).get("shortcodes") or []
+    active = _active_shortcodes()
+    items = []
+    for sc in dict.fromkeys(codes):
+        row = db.get_reel(sc) if isinstance(sc, str) else None
+        if row and row["status"] != "processed" and sc not in active:
+            items.append({"input": row["url"], "shortcode": sc, "url": row["url"]})
+    if not items:
+        return jsonify({"error": "Tidak ada item yang perlu dicoba lagi."}), 400
+    return jsonify(_job_view(_enqueue(items))), 202
+
+
+# --- Login Instagram (sesi habis) ---------------------------------------
+
+_login_proc = None
+
+
+@app.get("/api/instagram")
+def instagram_status():
+    running = _login_proc is not None and _login_proc.poll() is None
+    return jsonify({"logged_in": download.instagram_logged_in(), "login_running": running})
+
+
+@app.post("/api/instagram/login")
+def instagram_login():
+    """Buka jendela Chromium untuk login Instagram (login.py) di komputer ini."""
+    global _login_proc
+    if _login_proc is None or _login_proc.poll() is not None:
+        _login_proc = subprocess.Popen([sys.executable, str(BASE / "login.py")], cwd=str(BASE))
+    return jsonify({"login_running": True}), 202
 
 
 @app.get("/api/jobs/<job_id>")

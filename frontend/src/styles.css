@@ -210,9 +210,58 @@ body.resizing { cursor: col-resize; user-select: none; }
 .msg ul, .msg ol { padding-left: 20px; }
 .typing { color: var(--muted); font-style: italic; }
 .cite {
-  border: 0; padding: 0 6px; margin: 0 1px; border-radius: 999px;
-  background: var(--accent-soft); color: var(--accent); font-size: 0.75em; font-weight: 600;
-  vertical-align: 1px;
+  border: 0; padding: 0; margin: 0 1px; min-width: 1.45em; height: 1.45em; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 0.7em; font-weight: 700;
+  line-height: 1.45em; text-align: center; vertical-align: super;
+}
+.cite:hover { background: var(--accent); color: #fff; }
+.cite::before { content: attr(data-n); } /* bukan teks asli -> tidak ikut terkutip */
+
+/* --- pilihan model chat --- */
+.model-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 16px 0;
+  border-top: 1px solid var(--border); font-size: 0.82rem;
+}
+.model-bar label { color: var(--muted); }
+.model-bar select {
+  font: inherit; color: inherit; padding: 4px 8px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg); max-width: 55%;
+}
+.model-note { color: var(--muted); font-size: 0.78rem; flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-bar + .chat-input { border-top: 0; }
+.usage strong { font-weight: 600; color: var(--text); }
+
+/* --- balas teks yang diblok --- */
+.reply-btn {
+  position: absolute; z-index: 4; transform: translateX(-50%);
+  padding: 6px 12px; border-radius: 999px; border: 0;
+  background: var(--text); color: var(--bg); font-size: 0.82rem; font-weight: 600;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.25); white-space: nowrap;
+}
+.reply-btn:hover { background: var(--accent); color: #fff; }
+.quote-preview {
+  display: flex; gap: 8px; align-items: flex-start;
+  margin: 0 16px; padding: 8px 10px 8px 12px; border-left: 3px solid var(--accent);
+  background: var(--bg); border-radius: 0 8px 8px 0; border-top: 1px solid var(--border);
+}
+.quote-preview-text { flex: 1; min-width: 0; display: flex; flex-direction: column; font-size: 0.82rem; }
+.quote-preview-text strong { color: var(--accent); font-size: 0.75rem; }
+.quote-preview-text span {
+  color: var(--muted); white-space: pre-wrap;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.quote-preview .close { position: static; font-size: 1.2rem; }
+.msg-quote {
+  border-left: 3px solid rgb(255 255 255 / 0.6); padding: 2px 0 2px 8px; margin-bottom: 6px;
+  font-size: 0.85em; opacity: 0.9; white-space: pre-wrap;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;
+}
+.source { display: flex; gap: 8px; align-items: baseline; }
+.source-num {
+  flex: none; min-width: 1.5em; height: 1.5em; line-height: 1.5em; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent); font-size: 0.75em; font-weight: 700;
+  text-align: center;
 }
 .sources { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); font-size: 0.85rem; }
 .source { text-align: left; border: 0; background: none; padding: 2px 0; color: var(--accent); }
@@ -223,6 +272,41 @@ body.resizing { cursor: col-resize; user-select: none; }
   flex: 1; resize: none; font: inherit; color: inherit; padding: 8px 12px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 12px;
 }
+
+/* --- tombol coba lagi & login Instagram --- */
+.retry-btn { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; flex: none; }
+.retry-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.retry-icon { display: inline-block; font-size: 1.05rem; line-height: 1; }
+.retry-icon.spinning { animation: spin 0.8s linear infinite; }
+.add-subtitle { font-size: 0.9rem; margin: 18px 0 0; color: var(--muted); }
+.login-box {
+  margin-top: 14px; padding: 12px 14px; border-radius: 10px;
+  border: 1px solid var(--accent); background: var(--accent-soft);
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+}
+.login-box p { margin: 0; font-size: 0.88rem; }
+.hint.ok { color: #15803d; margin: 10px 0 0; }
+@media (max-width: 520px) { .retry-label { display: none; } } /* layar sempit: ikon ↻ saja */
+
+/* --- riwayat percakapan --- */
+.chat-head .btn { padding: 6px 12px; font-size: 0.88rem; }
+.chat-head .btn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.history { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.history-list { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; gap: 6px; }
+.history-list li {
+  display: flex; align-items: stretch; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg); overflow: hidden;
+}
+.history-list li.active { border-color: var(--accent); }
+.history-open {
+  flex: 1; min-width: 0; text-align: left; border: 0; background: none; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.history-open:hover { background: var(--surface-2); }
+.history-title { font-size: 0.92rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-meta { font-size: 0.75rem; color: var(--muted); }
+.history-delete { border: 0; background: none; padding: 0 14px; color: var(--muted); font-size: 1.2rem; }
+.history-delete:hover { color: var(--danger); background: var(--surface-2); }
 
 /* --- dialog tambah materi --- */
 .add-modal { width: min(640px, 100%); padding: 24px 28px; }

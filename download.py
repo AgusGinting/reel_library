@@ -20,6 +20,7 @@ import random
 import http.cookiejar
 import json
 import re
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -151,7 +152,66 @@ def _api_item(shortcode):
     req = urllib.request.Request(
         f"https://www.instagram.com/api/v1/media/{media_id(shortcode)}/info/",
         headers={"User-Agent": UA, "X-IG-App-ID": IG_APP_ID})
-    return json.loads(opener.open(req, timeout=30).read())["items"][0]
+    with opener.open(req, timeout=30) as resp:
+        body, final_url = resp.read(), resp.geturl()
+    # Sesi habis -> Instagram mengalihkan ke halaman login (HTML), bukan JSON.
+    if "/accounts/login" in final_url or not body.lstrip().startswith(b"{"):
+        raise InstagramLoginRequired(LOGIN_HELP)
+    return json.loads(body)["items"][0]
+
+
+class InstagramLoginRequired(RuntimeError):
+    pass
+
+
+_anon_lock = threading.Lock()
+
+
+def _anon_item(shortcode):
+    """Data postingan Instagram publik TANPA login, atau None.
+
+    yt-dlp sudah mengambil data postingan secara anonim (`xig_polaris_media`), tetapi
+    berhenti ("There is no video in this post") bila postingan hanya berisi foto, karena
+    ia pengunduh video. Data itu disadap tepat saat diberikan ke `_extract_product`;
+    bentuknya sama dengan item API media (carousel_media, image_versions2, caption, user).
+    """
+    from yt_dlp.extractor.instagram import InstagramIE
+
+    captured = {}
+    with _anon_lock:   # tambalan sementara pada kelas -> jangan dipakai bersamaan
+        original = InstagramIE._extract_product
+
+        def spy(self, product_info, *args, **kwargs):
+            captured.setdefault("item", product_info)   # panggilan pertama = postingan induk
+            return original(self, product_info, *args, **kwargs)
+
+        InstagramIE._extract_product = spy
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+                ydl.extract_info(f"https://www.instagram.com/p/{shortcode}/",
+                                 download=False, process=False)
+        except yt_dlp.utils.DownloadError:
+            pass   # "There is no video in this post" dll. — data mungkin sudah tertangkap
+        finally:
+            InstagramIE._extract_product = original
+    item = captured.get("item")
+    if isinstance(item, list):
+        item = item[0] if item else None
+    return item if isinstance(item, dict) and (item.get("carousel_media") or item.get("image_versions2")) else None
+
+
+LOGIN_HELP = ("Postingan ini tidak bisa dibuka tanpa login (privat/dibatasi) dan sesi "
+              "Instagram habis. Klik \"Login Instagram\" di jendela Tambah materi (atau "
+              "jalankan: python login.py), login, lalu coba lagi.")
+
+
+def instagram_logged_in():
+    """True bila cookies.txt memuat sessionid (tanda masih login Instagram)."""
+    if not COOKIES.exists():
+        return False
+    jar = http.cookiejar.MozillaCookieJar(str(COOKIES))
+    jar.load(ignore_discard=True, ignore_expires=True)
+    return any(c.name == "sessionid" and c.value and "instagram.com" in c.domain for c in jar)
 
 
 def _fetch(url, path):
@@ -160,14 +220,18 @@ def _fetch(url, path):
         path.write_bytes(resp.read())
 
 
-def download_slides(reel):
-    """Unduh semua slide (foto/video) postingan lewat API media Instagram.
+def download_slides(reel, item=None):
+    """Unduh semua slide (foto/video) postingan Instagram. `item` = data postingan
+    (dari _anon_item tanpa login); bila None diambil lewat API media (butuh login).
     Slide disimpan sebagai data/<sc>/slide_NN.jpg|mp4. Mengembalikan jumlah slide."""
     sc = reel["shortcode"]
     folder = DATA / sc
     folder.mkdir(parents=True, exist_ok=True)
 
-    item = _api_item(sc)
+    item = item or _api_item(sc)
+    # yt-dlp mungkin sudah sempat mengunduh slide pertama sebagai video.* sebelum gagal.
+    for leftover in folder.glob("video.*"):
+        leftover.unlink()
     parts = item.get("carousel_media") or [item]
     first_video = first_img = None
     for i, m in enumerate(parts, 1):
@@ -209,10 +273,16 @@ def download_reel(reel):
     try:
         dur = download_one(reel)
         return f"{dur or '?'} dtk"
-    except (yt_dlp.utils.DownloadError, NoVideoFile):
-        if "instagram.com" in url:
-            return f"carousel {download_slides(reel)} slide"
-        raise
+    except (yt_dlp.utils.DownloadError, NoVideoFile) as exc:
+        if "instagram.com" not in url:
+            raise
+        # Postingan foto/carousel: coba tanpa login dulu (postingan publik), baru API login.
+        item = _anon_item(reel["shortcode"])
+        if item:
+            return f"carousel {download_slides(reel, item)} slide (tanpa login)"
+        if not instagram_logged_in():
+            raise InstagramLoginRequired(LOGIN_HELP) from exc
+        return f"carousel {download_slides(reel)} slide"
 
 
 def _download_tiktok(reel, attempts=3):
@@ -234,10 +304,14 @@ def _download_tiktok(reel, attempts=3):
 
 
 def ensure_cookies(max_age_hours=12, log=print):
-    """Pakai cookies.txt yang ada bila masih baru; ekspor ulang bila sudah lama.
+    """Pakai cookies.txt yang ada bila masih baru & masih login; ekspor ulang bila
+    sudah lama atau sesi tidak ada (mungkin baru login lagi lewat login.py/collect.py).
     Bila ekspor gagal (mis. collect.py sedang membuka profil), tetap pakai yang lama."""
-    fresh = COOKIES.exists() and time.time() - COOKIES.stat().st_mtime < max_age_hours * 3600
-    if fresh:
+    logged_in = instagram_logged_in()
+    # Belum login: postingan publik tetap bisa diunduh tanpa login, jadi jangan buka
+    # Chromium tiap kali — cukup periksa ulang paling sering tiap 30 menit.
+    age_limit = max_age_hours * 3600 if logged_in else 1800
+    if COOKIES.exists() and time.time() - COOKIES.stat().st_mtime < age_limit:
         return
     try:
         export_cookies()

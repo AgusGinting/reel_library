@@ -10,6 +10,7 @@ sudah diproses sehingga pipeline bisa dilanjutkan (resume):
 """
 
 import csv
+import json
 import sqlite3
 import time
 
@@ -66,6 +67,28 @@ CREATE TABLE IF NOT EXISTS embeddings (
   vector    BLOB,
   model     TEXT
 );
+
+-- Riwayat percakapan "Tanya AI". refs = pemetaan id pendek di jawaban (R12) ke reel,
+-- disimpan per percakapan agar rujukan lama tetap benar walau item baru ditambahkan.
+CREATE TABLE IF NOT EXISTS chats (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL,
+  refs        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id     TEXT NOT NULL,
+  role        TEXT NOT NULL,        -- user | assistant
+  text        TEXT NOT NULL,
+  sources     TEXT,                 -- JSON (assistant)
+  usage       TEXT,                 -- JSON (assistant)
+  model       TEXT,                 -- id model yang menjawab (assistant)
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages(chat_id, id);
 """
 
 
@@ -90,6 +113,10 @@ def init_db():
 
 def _migrate(conn):
     """Upgrade DB lama ke skema terbaru."""
+    chat_cols = {r["name"] for r in conn.execute("PRAGMA table_info(chat_messages)")}
+    if chat_cols and "model" not in chat_cols:
+        conn.execute("ALTER TABLE chat_messages ADD COLUMN model TEXT")
+
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(reels)")}
     if not cols:
         return
@@ -174,6 +201,71 @@ def total():
     n = conn.execute("SELECT COUNT(*) FROM reels").fetchone()[0]
     conn.close()
     return n
+
+
+# --- riwayat percakapan -------------------------------------------------
+
+def list_chats():
+    conn = connect()
+    rows = conn.execute(
+        "SELECT c.id, c.title, c.updated_at, COUNT(m.id) AS messages "
+        "FROM chats c LEFT JOIN chat_messages m ON m.chat_id = c.id "
+        "GROUP BY c.id ORDER BY c.updated_at DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_chat(chat_id):
+    """Percakapan + semua pesannya, atau None."""
+    conn = connect()
+    chat = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+    if not chat:
+        conn.close()
+        return None
+    msgs = conn.execute(
+        "SELECT role, text, sources, usage, model FROM chat_messages WHERE chat_id = ? ORDER BY id",
+        (chat_id,)).fetchall()
+    conn.close()
+    data = dict(chat)
+    data["refs"] = json.loads(data["refs"])
+    data["messages"] = [
+        {"role": m["role"], "text": m["text"],
+         "sources": json.loads(m["sources"]) if m["sources"] else None,
+         "usage": json.loads(m["usage"]) if m["usage"] else None,
+         "model": m["model"]}
+        for m in msgs
+    ]
+    return data
+
+
+def add_chat_turn(chat_id, question, answer, sources, usage, refs, model=None):
+    """Simpan satu tanya-jawab; membuat percakapan baru bila belum ada."""
+    ts = now()
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO chats (id, title, refs, created_at, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET refs = excluded.refs, updated_at = excluded.updated_at",
+            (chat_id, question.strip().splitlines()[0][:80], json.dumps(refs, ensure_ascii=False),
+             ts, ts))
+        conn.execute(
+            "INSERT INTO chat_messages (chat_id, role, text, created_at) VALUES (?, 'user', ?, ?)",
+            (chat_id, question, ts))
+        conn.execute(
+            "INSERT INTO chat_messages (chat_id, role, text, sources, usage, model, created_at) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+            (chat_id, answer, json.dumps(sources, ensure_ascii=False), json.dumps(usage),
+             model, ts))
+    conn.close()
+
+
+def delete_chat(chat_id):
+    conn = connect()
+    with conn:
+        conn.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
+        deleted = conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,)).rowcount
+    conn.close()
+    return deleted > 0
 
 
 def export_csv(path=CSV_OUT):
