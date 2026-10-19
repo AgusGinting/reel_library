@@ -86,6 +86,26 @@ CHAT_MODELS = [
 ]
 DEFAULT_CHAT_MODEL = "claude"
 
+# Alat internet Firecrawl yang diberikan ke AI (dipakai bila FIRECRAWL_API_KEY ada di .env).
+# Model memilih sendiri alat yang cocok; daftar ini hanya membatasi alat yang tersedia.
+# Semua 28 alat ≈ 13.800 token definisi per permintaan dan membingungkan model kecil, jadi
+# yang diberikan hanya yang berguna untuk perpustakaan belajar. Sengaja TIDAK dimasukkan:
+#   firecrawl_monitor_* (membuat/menghapus monitor di akunmu), firecrawl_agent (bisa
+#   menghabiskan banyak kredit), firecrawl_interact (browser sungguhan), firecrawl_crawl
+#   (banyak halaman = banyak kredit), *_feedback, firecrawl_gov_search (hukum AS).
+# Nama lengkap semua alat: lihat ARCHITECTURE.md atau firecrawl_tools() di web_tools.py.
+FIRECRAWL_MCP_URL = "https://mcp.firecrawl.dev/v2/mcp"
+FIRECRAWL_TOOLS = [
+    "firecrawl_search",  # cari di web (hasil + cuplikan)
+    "firecrawl_scrape",  # buka satu halaman (termasuk halaman JavaScript)
+    "firecrawl_map",  # daftar URL di sebuah situs
+    "firecrawl_parse",  # baca dokumen (PDF, DOCX, dll.)
+    "firecrawl_developer_search",  # pertanyaan pemrograman: repo, issue, dokumentasi
+    "firecrawl_research_search_papers",  # cari paper ilmiah
+    "firecrawl_research_inspect_paper",  # metadata satu paper
+    "firecrawl_research_read_paper",  # baca bagian paper yang relevan
+]
+
 
 def _load_dotenv(path=BASE / ".env"):
     import os

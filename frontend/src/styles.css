@@ -231,6 +231,18 @@ body.resizing { cursor: col-resize; user-select: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-bar + .chat-input { border-top: 0; }
 .usage strong { font-weight: 600; color: var(--text); }
+.web-toggle {
+  flex: none; font-size: 0.78rem; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--muted);
+}
+.web-toggle.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.web-tools {
+  list-style: none; margin: 0 0 8px; padding: 6px 10px; border-radius: 8px;
+  background: var(--surface-2); font-size: 0.78rem; color: var(--muted);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.web-tools li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-tools a { color: var(--accent); }
 
 /* --- balas teks yang diblok --- */
 .reply-btn {

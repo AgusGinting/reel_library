@@ -14,3 +14,8 @@ nvidia-cudnn-cu12==9.27.0.42
 # Tahap 3b-4: Claude API & web
 anthropic==1.13.0
 Flask==3.1.3
+
+# Alat internet untuk chat (web_tools.py)
+ddgs==9.16.0
+certifi==2026.7.22            # sertifikat Windows di mesin ini usang
+mcp==2.3.0                   # klien MCP untuk alat Firecrawl (FIRECRAWL_API_KEY)

@@ -34,6 +34,7 @@ import download
 import links
 import ollama_chat
 import pipeline
+import web_tools
 from ask import claude_librarian
 from config import BASE, CHAT_MODELS, DATA, DEFAULT_CHAT_MODEL, has_api_key
 from links import SC_RE
@@ -243,15 +244,20 @@ def _get_session(cid, model_id):
 class _Turn:
     """Satu jawaban yang sedang dibuat; bisa ditonton oleh beberapa stream SSE."""
 
-    def __init__(self, question):
+    def __init__(self, question, web=False):
         self.question = question
-        self.chunks = []
+        self.web = web               # akses internet diizinkan untuk pertanyaan ini
+        self.chunks = []             # str = potongan teks; dict = pemakaian alat internet
         self.final = None            # ("done"|"error", data) setelah selesai
         self.cond = threading.Condition()
 
     @property
     def text(self):
-        return "".join(self.chunks)
+        return "".join(c for c in self.chunks if isinstance(c, str))
+
+    @property
+    def tools(self):
+        return [c for c in self.chunks if isinstance(c, dict)]
 
     def push(self, chunk):
         with self.cond:
@@ -273,10 +279,12 @@ class _Turn:
 
 def _answer(lib, cid, turn):
     try:
-        for text in lib.stream(turn.question):
-            turn.push(text)
+        for chunk in lib.stream(turn.question, web=turn.web):
+            turn.push(chunk["tool"] if isinstance(chunk, dict) else chunk)
         u = lib.usage
-        sources = [{"ref": ref, **lib.refs[ref]} for ref in lib.cited]
+        # Sumber = item perpustakaan yang dirujuk + pencarian/halaman web yang dipakai.
+        sources = ([{"ref": ref, **lib.refs[ref]} for ref in lib.cited]
+                   + [{"web": t} for t in lib.web])
         usage = {"input": u.input_tokens, "output": u.output_tokens,
                  "cache_read": u.cache_read_input_tokens or 0,
                  "cache_write": u.cache_creation_input_tokens or 0}
@@ -301,7 +309,7 @@ def models():
         ok, why = _model_status(m)
         out.append({"id": m["id"], "label": m["label"], "note": m["note"],
                     "provider": m["provider"], "available": ok, "reason": why})
-    return jsonify({"models": out, "default": DEFAULT_CHAT_MODEL})
+    return jsonify({"models": out, "default": DEFAULT_CHAT_MODEL, "web": web_tools.backends()})
 
 
 @app.get("/api/chats")
@@ -320,7 +328,8 @@ def chat_detail(cid):
         saved = {"id": cid, "title": turn.question, "messages": [], "refs": lib.refs}
     saved["refs"] = _public_refs(saved["refs"])
     # Jawaban yang masih dibuat (mis. halaman di-refresh/pindah tab di tengah jawaban).
-    saved["pending"] = {"question": turn.question, "text": turn.text} if turn else None
+    saved["pending"] = ({"question": turn.question, "text": turn.text, "tools": turn.tools}
+                        if turn else None)
     return jsonify(saved)
 
 
@@ -352,7 +361,7 @@ def chat():
 
     # Jawaban dibuat di thread terpisah sampai selesai & disimpan, walau browser
     # terputus (tab di-refresh, dibekukan, atau ditutup). Stream SSE hanya "menonton".
-    turn = _Turn(question)
+    turn = _Turn(question, web=bool(body.get("web")))
     lib.pending = turn
     threading.Thread(target=_answer, args=(lib, cid, turn), daemon=True).start()
 
@@ -362,8 +371,8 @@ def chat():
         sent = 0
         while True:
             chunks, final = turn.wait(sent)
-            for text in chunks:
-                yield sse("text", {"text": text})
+            for chunk in chunks:
+                yield sse("tool", chunk) if isinstance(chunk, dict) else sse("text", {"text": chunk})
             sent += len(chunks)
             if final:
                 yield sse(*final)

@@ -19,11 +19,11 @@ export async function postJSON(url, body) {
  * Kirim pertanyaan ke /api/chat dan baca jawabannya sebagai Server-Sent Events.
  * onEvent(event, data) dipanggil untuk tiap event: meta | text | done | error.
  */
-export async function streamChat({ question, conversationId, model, onEvent, signal }) {
+export async function streamChat({ question, conversationId, model, web, onEvent, signal }) {
   const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, conversation_id: conversationId, model }),
+    body: JSON.stringify({ question, conversation_id: conversationId, model, web }),
     signal,
   });
   if (!res.ok) {

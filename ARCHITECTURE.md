@@ -65,6 +65,7 @@ semua skrip secara berurutan; item lama dilewati.
 | Model chat gratis | Ollama cloud `gemma4:31b-cloud` (+ `treyleo16/kimi-k3`), dipilih per pertanyaan | GPU 4 GB tidak sanggup model besar lokal. `kimi-k3:cloud` asli (2,8T, konteks 1M) membalas **402** di paket gratis. Manifest registry `treyleo16/kimi-k3` ternyata `remote_model: gemma4:31b` + system prompt yang mengaku "Kimi K3 by Moonshot AI" (diperiksa tanpa mengunduh: `registry.ollama.ai/v2/<nama>/manifests/latest` → blob config). Gemma tidak diberi seluruh perpustakaan (±250k token tiap pertanyaan menguras jatah gratis): ia menerima `<katalog>` semua judul + `<detail>` 15 item teratas hasil FTS5 (OR antar kata, tanpa stopword, digabung pertanyaan sebelumnya) ≈ 14k token, ±3 detik per jawaban. |
 | Rujukan sumber | Item diberi id pendek `R1`…`Rn` di prompt; server memetakan balik ke shortcode | Saat memakai shortcode langsung, model menukar dua id mirip (`DcRaD8vsTwR` vs `DcRJg5fDdsJ`) sehingga rujukannya salah. Dengan id pendek, 7/7 rujukan pada uji yang sama tepat. |
 | Penolakan model | `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) per model (`CHAT_MODELS[].fallbacks`) | Jika Claude menolak, server otomatis mencoba model lain. |
+| Akses internet | Alat dijalankan server ini lewat tool use — sama untuk Claude & Ollama. Dengan `FIRECRAWL_API_KEY`: alat dari **server MCP Firecrawl** (`mcp.firecrawl.dev/v2/mcp`, SDK `mcp`), difilter `FIRECRAWL_TOOLS`; tanpa key: `web_search`/`fetch_url` milik sendiri | Bukan server tool penyedia (web search Claude hanya untuk Claude, $10/1.000 pencarian). MCP Firecrawl punya 28 alat ≈ 13.800 token definisi; dipilih 8 (search, scrape, map, parse, developer_search, research_search/inspect/read_paper) ≈ 6.000 token — tanpa alat yang mengubah akun (monitor_*), boros kredit (agent, crawl) atau browser sungguhan (interact). Daftar alat ditetapkan sekali per proses server (`active_tools()`), karena daftar alat Claude tidak boleh berubah di tengah percakapan. Bila panggilan Firecrawl gagal, `firecrawl_search`/`scrape` dialihkan ke `web_search`/`fetch_url`. Teruji (2026-10-19): Haiku 5.5 memilih `firecrawl_search` sendiri untuk pertanyaan pemrograman (2 kredit); Gemma memakai alat hanya bila diminta eksplisit ("cari di internet"). Mesin gratis: ddgs `bing` → `duckduckgo`. Teruji: DuckDuckGo memblokir setelah 2 pencarian, Brave/Mojeek/Yahoo/Google kosong, Bing ikut memblokir setelah belasan pencarian; endpoint MCP Firecrawl "tanpa key" menolak akses anonim. Sertifikat Windows mesin ini usang → `fetch_url` memakai bundel `certifi`. |
 | Keadaan tampilan | `sessionStorage` (per tab) + `localStorage` lewat `frontend/src/storage.js`; jawaban chat dibuat di thread server | Chrome memuat ulang tab latar belakang saat RAM menipis (laptop 8 GB), sehingga halaman sempat "ter-reset" dan jawaban yang sedang dialirkan hilang. |
 | Penyimpanan & cari | SQLite + FTS5 | Satu file, tanpa server. FTS dengan pencarian awalan kata + snippet highlight. |
 | Web | Flask (backend) + React/Vite (frontend) | Flask cocok dengan kode sinkron yang ada dan `send_from_directory` mendukung Range (video bisa di-seek). Frontend di-build ke `frontend/dist` dan disajikan Flask → cukup satu perintah. |
@@ -85,6 +86,7 @@ reel_collector/
 ├── login.py            login ulang Instagram (jendela Chromium) + ekspor cookies
 ├── ask.py              Tahap 4  tanya jawab Claude (CLI) — Librarian, penomoran R, format item
 ├── retrieval.py        Tahap 4  mode pencarian: katalog semua judul + detail item relevan (FTS)
+├── web_tools.py        Tahap 4  alat internet untuk semua model (Firecrawl MCP / cari & buka gratis)
 ├── ollama_chat.py      Tahap 4  tanya jawab via Ollama (memakai retrieval.py)
 ├── library.py          Tahap 4  server Flask
 ├── db.py               skema SQLite, migrasi, helper
@@ -243,7 +245,7 @@ membangun ulang indeks FTS bila perlu.
 | `GET /api/reels?q=&category=&learning=1\|0\|all` | daftar kartu; `q` → FTS (`"kata"*` per kata, urut `rank`, snippet dengan penanda `[[ ]]`) |
 | `GET /api/reels/<sc>` | detail + daftar media (video / slide) |
 | `GET /media/<sc>/<file>` | file media; nama dibatasi regex, mendukung Range |
-| `POST /api/chat` | `{question, conversation_id?, model?}` → Server-Sent Events: `meta` (conversation_id, refs), `text`*, `done` (sources, usage, model) atau `error`; `409` bila percakapan masih menjawab, `503` bila model tidak tersedia |
+| `POST /api/chat` | `{question, conversation_id?, model?, web?}` → Server-Sent Events: `meta` (conversation_id, refs), `text`* / `tool`* (pemakaian internet), `done` (sources, usage, model) atau `error`; `409` bila percakapan masih menjawab, `503` bila model tidak tersedia |
 | `GET /api/models` | model chat dari `CHAT_MODELS` + `available`/`reason` (Claude: ada API key; Ollama: server jalan & model sudah di-pull, dicek via `/api/tags`) |
 | `GET /api/chats` | daftar riwayat `{id, title, updated_at, messages}` (terbaru dulu) |
 | `GET /api/chats/<id>` | satu percakapan: `messages[]` (role, text, sources, usage, model) + `refs` + `pending` (jawaban yang masih dibuat) |
@@ -279,6 +281,19 @@ membangun ulang indeks FTS bila perlu.
   jadi rujukan, riwayat, dan tampilan tidak membedakan model. Instruksinya meminta model mengabaikan persona lain — terbukti
   menimpa system prompt "Kimi K3" bawaan treyleo16. `chat_messages.model` mencatat model
   yang menjawab.
+- **Akses internet** (`web` di `POST /api/chat`): `Librarian.stream()` / `OllamaLibrarian.stream()`
+  menjalankan putaran alat (maks. 6): model meminta alat → `web_tools.run_tool()` → hasil
+  dikirim balik → ulangi sampai menjawab. Stream menghasilkan `str` (teks) atau
+  `{"tool": …}`; SSE meneruskannya sebagai event `tool`, dan pemakaiannya disimpan di
+  `sources` (`{"web": {...}}`). **Claude**: daftar alat & petunjuknya selalu dikirim dan tidak
+  pernah berubah (mengubah `system`/`tools` di tengah percakapan membatalkan blok thinking →
+  400); saat internet mati cukup `tool_choice: none`. Teruji: internet ON lalu OFF di
+  percakapan yang sama tanpa error. **Ollama**: alat hanya dikirim saat aktif; petunjuk
+  internet diletakkan di depan system prompt + `TURN_NOTE` di pertanyaan — tanpa itu Gemma
+  mengabaikan alat lalu mengaku "berdasarkan pencarian internet" (terjadi saat uji).
+  Pengaman: `fetch_url` hanya http/https dan menolak alamat lokal/privat (termasuk lewat
+  redirect); hasil dibungkus `<web_content>` dan model diminta tidak menuruti instruksi di
+  dalamnya.
 - **Balas teks yang diblok**: kutipan dikirim sebagai blockquote markdown di depan pertanyaan
   (`> kutipan\n\npertanyaan`) — tanpa field/endpoint baru, ikut tersimpan di `chat_messages`,
   dan dipisah lagi oleh `splitQuote()` saat ditampilkan. Nomor rujukan dirender lewat CSS

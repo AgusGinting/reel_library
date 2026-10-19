@@ -24,6 +24,14 @@ const linkCitations = (text, refs) => {
   });
 };
 
+const hostOf = (url) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+};
+
 function Answer({ msg, refs, onOpenReel, labelOf }) {
   const components = {
     // Nomor ditampilkan lewat CSS (data-n) agar tidak ikut tersalin saat teks diblok untuk dibalas.
@@ -35,18 +43,36 @@ function Answer({ msg, refs, onOpenReel, labelOf }) {
         <a href={href} target="_blank" rel="noreferrer">{children}</a>
       ),
   };
+  // Pemakaian internet: langsung saat dialirkan (msg.tools) atau dari riwayat (sources.web).
+  const tools = msg.tools ?? (msg.sources || []).filter((s) => s.web).map((s) => s.web);
+  const library = (msg.sources || []).filter((s) => s.shortcode);
   return (
     <div className="msg assistant">
+      {tools.length > 0 && (
+        <ul className="web-tools">
+          {tools.map((t, i) => (
+            <li key={i}>
+              {t.type === "search" ? (
+                <>🔎 mencari: <em>{t.label}</em></>
+              ) : t.type === "fetch" ? (
+                <>🌐 membuka: <a href={t.url} target="_blank" rel="noreferrer">{hostOf(t.url)}</a></>
+              ) : (
+                <>🧰 {t.label}</>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
       {msg.text ? (
         <Markdown components={components}>{linkCitations(msg.text, refs)}</Markdown>
       ) : (
-        !msg.error && <span className="typing">Membaca perpustakaan…</span>
+        !msg.error && <span className="typing">{tools.length ? "Membaca hasil internet…" : "Membaca perpustakaan…"}</span>
       )}
       {msg.error && <p className="notice error">{msg.error}</p>}
-      {msg.sources?.length > 0 && (
+      {library.length > 0 && (
         <div className="sources">
           <strong>Sumber</strong>
-          {msg.sources.map((s, i) => (
+          {library.map((s, i) => (
             <button key={s.shortcode} className="source" onClick={() => onOpenReel(s.shortcode)}>
               <span className="source-num">{i + 1}</span>
               {s.title}
@@ -159,7 +185,7 @@ const rememberChatId = (id) => savePref(CHAT_KEY, id);
 const withPending = (chat) =>
   chat.pending
     ? [...chat.messages, { role: "user", text: chat.pending.question },
-      { role: "assistant", text: chat.pending.text, resuming: true }]
+      { role: "assistant", text: chat.pending.text, tools: chat.pending.tools, resuming: true }]
     : chat.messages;
 
 const formatDate = (s) =>
@@ -226,11 +252,14 @@ export default function ChatPanel({ width, onResize, onResetWidth, aiReady, onCl
   const [selection, setSelection] = useState(null); // {text, top, left} tombol "Balas"
   const [models, setModels] = useState([]);         // dari /api/models
   const [modelId, setModelId] = useState(() => loadPref(MODEL_KEY));
+  const [web, setWeb] = usePersistentState("chatWeb", false, "local"); // izinkan akses internet
+  const [webEngines, setWebEngines] = useState(null); // mesin pencari aktif (dari server)
 
   useEffect(() => {
     getJSON("/api/models")
-      .then(({ models: list, default: fallback }) => {
+      .then(({ models: list, default: fallback, web: engines }) => {
         setModels(list);
+        setWebEngines(engines);
         setModelId((current) => (list.some((m) => m.id === current) ? current : fallback));
       })
       .catch(() => {});
@@ -368,6 +397,7 @@ export default function ChatPanel({ width, onResize, onResetWidth, aiReady, onCl
         question,
         conversationId: conversationId.current,
         model: modelId,
+        web,
         signal: abortRef.current.signal,
         onEvent: (event, data) => {
           if (event === "meta") {
@@ -375,6 +405,7 @@ export default function ChatPanel({ width, onResize, onResetWidth, aiReady, onCl
             setRefs((prev) => ({ ...prev, ...data.refs })); // jangan hilangkan rujukan jawaban lama
           }
           else if (event === "text") patchLast((m) => ({ ...m, text: m.text + data.text }));
+          else if (event === "tool") patchLast((m) => ({ ...m, tools: [...(m.tools || []), data] }));
           else if (event === "done") patchLast((m) => ({ ...m, sources: data.sources, usage: data.usage, model: data.model }));
           else if (event === "error") patchLast((m) => ({ ...m, error: data.message }));
         },
@@ -478,6 +509,15 @@ export default function ChatPanel({ width, onResize, onResetWidth, aiReady, onCl
               );
             })}
           </select>
+          <button
+            type="button"
+            className={`web-toggle ${web ? "on" : ""}`}
+            aria-pressed={web}
+            onClick={() => setWeb((v) => !v)}
+            title={`Akses internet ${web ? "AKTIF" : "mati"} · mesin: ${webEngines?.search.join(" → ") ?? "-"}`}
+          >
+            🌐 Internet
+          </button>
           <span className="model-note" title={model?.reason || model?.note}>
             {model?.available ? model.note : model?.reason}
           </span>

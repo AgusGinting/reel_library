@@ -34,6 +34,7 @@ Buat file `.env` di folder proyek berisi API key (jangan dibagikan):
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
+FIRECRAWL_API_KEY=fc-...     # opsional: pencarian internet yang andal (firecrawl.dev)
 ```
 
 ## Memakai perpustakaan
@@ -76,6 +77,20 @@ Buka **http://127.0.0.1:5000**.
   Model boleh diganti di tengah percakapan; tiap jawaban mencatat model yang menjawab.
   Model Ollama butuh aplikasi Ollama berjalan, login (`ollama signin`), dan sudah
   di-pull (`ollama pull gemma4:31b-cloud`). Tambah model lain di `CHAT_MODELS` (`config.py`).
+- **🌐 Internet** (tombol di samping pilihan model): izinkan AI mencari di internet dan
+  membuka link. Berlaku untuk **semua model** (Claude & Ollama) karena alatnya dijalankan
+  server ini sendiri (`web_tools.py`). Di atas jawaban tampil apa yang dicari/dibuka.
+  - **Dengan `FIRECRAWL_API_KEY`** (disarankan): AI mendapat alat Firecrawl lewat server
+    MCP-nya — cari web, buka halaman (termasuk halaman JavaScript), peta URL situs, baca
+    dokumen/PDF, cari di GitHub & dokumentasi, cari & baca paper. **Tidak perlu memilih
+    manual**: model memilih alat sendiri. Daftar alat yang diberikan diatur di
+    `FIRECRAWL_TOOLS` (`config.py`); alat yang mengubah akun (monitor) atau boros kredit
+    (agent, crawl) sengaja tidak dimasukkan. Biaya kredit Firecrawl kecil (pencarian ±2
+    kredit); bila kredit habis, cari & buka halaman otomatis beralih ke mesin gratis.
+  - **Tanpa key**: gratis lewat Bing → DuckDuckGo — **rapuh**, keduanya bisa memblokir
+    setelah beberapa pencarian beruntun. Membuka link tetap jalan.
+  - **Tips Gemma/treyleo16**: tulis "cari di internet …" secara eksplisit. Claude memutuskan
+    sendiri kapan perlu mencari; Gemma cenderung menjawab dari perpustakaan saja.
 - **Balas bagian tertentu**: blok (sorot) teks di jawaban atau pesanmu → klik **↩ Balas**
   → tulis pertanyaan. Kutipan dikirim ke AI sebagai konteks dan tampil di gelembung pesanmu.
   **Esc** atau **×** membatalkan kutipan.
@@ -90,6 +105,7 @@ Tanya jawab juga bisa dari terminal:
 .\.venv\Scripts\python.exe ask.py                       # interaktif
 .\.venv\Scripts\python.exe ask.py "tool AI apa saja yang pernah direkomendasikan?"
 .\.venv\Scripts\python.exe ask.py --model claude-haiku-4-5 "reel tentang SQL?"   # pilih model Claude
+.\.venv\Scripts\python.exe ask.py --web "berita terbaru tentang ..."             # izinkan internet
 ```
 
 ## Menambah materi baru
@@ -178,6 +194,7 @@ Pemakaian token tiap jawaban ditampilkan di bawah jawaban.
 | Web: "Frontend belum di-build" | `cd frontend && npm install && npm run build`. |
 | Panel Tanya AI: "API key belum diatur" | Periksa `.env`, lalu restart `library.py`. Atau pilih model Gemma (gratis). |
 | Model Ollama "(tidak tersedia)" | Buka aplikasi Ollama; jalankan `ollama signin` dan `ollama pull <nama model>`, lalu buka ulang panel chat. |
+| Internet: "pencarian gagal di semua mesin" | Bing/DuckDuckGo memblokir sementara karena terlalu banyak pencarian. Tunggu beberapa menit, atau isi `FIRECRAWL_API_KEY` di `.env` lalu restart `library.py`. |
 | Ollama: "402 Payment Required" | Model itu tidak termasuk paket gratis Ollama (mis. `kimi-k3:cloud` asli). Pakai `gemma4:31b-cloud` atau isi kredit di ollama.com. |
 | Tambah link: "Gagal saat mengunduh" | Video privat/dihapus, atau sesi Instagram habis (lihat baris di atas). Link YouTube/TikTok: pastikan link video satuan, bukan playlist. |
 | TikTok: "HTTP Error 403: Forbidden" | TikTok sesekali memblokir akses beruntun. Sudah dicoba ulang otomatis; kalau tetap gagal, tunggu beberapa menit lalu tambahkan lagi. |

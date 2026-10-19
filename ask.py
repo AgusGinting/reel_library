@@ -8,15 +8,18 @@ Jalankan:
     python ask.py                          # mode tanya jawab interaktif
     python ask.py "reel mana yang bahas RAG?"   # satu pertanyaan
     python ask.py --model claude-haiku-4-5 "..."   # pilih model Claude dari CHAT_MODELS
+    python ask.py --web "berita terbaru soal ..."  # izinkan akses internet (web_tools.py)
 """
 
 import json
 import re
 import sys
+from types import SimpleNamespace
 
 import anthropic
 
 import db
+import web_tools
 from config import CHAT_MODELS, CLAUDE_MODEL, has_api_key
 
 INSTRUCTIONS = (
@@ -113,53 +116,94 @@ class Librarian:
             from retrieval import Retriever   # impor di sini: retrieval memakai modul ini
             self.retriever = Retriever(refs)
             self.refs = self.retriever.refs
-            self.system = [{"type": "text", "text": self.retriever.system_prompt(),
-                            "cache_control": {"type": "ephemeral"}}]
+            self.system = [{"type": "text", "text": self.retriever.system_prompt()}]
         else:
             library, self.refs = build_library(refs)
-            self.system = [
-                {"type": "text", "text": INSTRUCTIONS},
-                {"type": "text", "text": library, "cache_control": {"type": "ephemeral"}},
-            ]
+            self.system = [{"type": "text", "text": INSTRUCTIONS},
+                           {"type": "text", "text": library}]
+        # Petunjuk alat internet selalu ada & tidak berubah antar pertanyaan: system prompt
+        # dan daftar alat yang berubah di tengah percakapan membatalkan blok thinking (400).
+        self.system.append({"type": "text", "text": web_tools.INSTRUCTIONS,
+                            "cache_control": {"type": "ephemeral"}})
         self.messages = [{"role": m["role"], "content": m["text"]} for m in history or []]
+        self.questions = [m["text"] for m in history or [] if m["role"] == "user"]
         self.count = len(self.refs)
 
-    def stream(self, question):
-        """Alirkan potongan teks jawaban (rujukan berupa [R12]). Setelah selesai,
-        self.answer berisi teks jawaban utuh, self.cited id R yang dirujuk (urut
-        kemunculan, hanya yang valid), dan self.usage pemakaian token. Dipakai CLI & web."""
+    def stream(self, question, web=False):
+        """Alirkan jawaban: str = potongan teks (rujukan berupa [R12]); dict {"tool": ...}
+        = model sedang memakai alat internet (hanya bila web=True). Setelah selesai:
+        self.answer teks jawaban utuh, self.cited id R yang dirujuk, self.web daftar
+        pencarian/halaman yang dipakai, self.usage total token. Dipakai CLI & web."""
         content = question
         if self.retriever:
-            previous = [m["content"] for m in self.messages if m["role"] == "user"
-                        and isinstance(m["content"], str)]
-            content = self.retriever.user_message(question, previous)
+            content = self.retriever.user_message(question, self.questions)
+        if web:
+            content = f"{web_tools.TURN_NOTE}\n\n{content}"   # pesan baru: aman untuk cache & thinking
+        start = len(self.messages)
         self.messages.append({"role": "user", "content": content})
 
         params = dict(model=self.model, max_tokens=16000, system=self.system,
-                      messages=self.messages)
+                      tools=web_tools.claude_tools())
         if self.effort:
             params["output_config"] = {"effort": self.effort}
         if self.fallbacks:
             params.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
         api = self.client.beta.messages if self.fallbacks else self.client.messages
-        try:
-            with api.stream(**params) as stream:
-                yield from stream.text_stream
-                response = stream.get_final_message()
-        except BaseException:
-            self.messages.pop()   # pertanyaan gagal tidak masuk riwayat
-            raise
-        # Simpan seluruh blok (termasuk thinking) agar percakapan bisa berlanjut.
-        self.messages.append({"role": "assistant", "content": response.content})
 
-        self.answer = "".join(b.text for b in response.content if b.type == "text")
+        self.web, texts = [], []
+        totals = dict.fromkeys(("input_tokens", "output_tokens", "cache_read_input_tokens",
+                                "cache_creation_input_tokens"), 0)
+        try:
+            for round_no in range(web_tools.MAX_ROUNDS + 1):
+                # Internet mati / batas putaran habis -> alat tetap terdaftar tapi tidak
+                # boleh dipakai (tool_choice boleh berubah tanpa membatalkan thinking).
+                allow = web and round_no < web_tools.MAX_ROUNDS
+                params["tool_choice"] = {"type": "auto"} if allow else {"type": "none"}
+                first = True
+                with api.stream(**params, messages=self.messages) as stream:
+                    for text in stream.text_stream:
+                        if first and texts:
+                            yield "\n\n"   # pisahkan teks dari putaran sebelumnya
+                        first = False
+                        yield text
+                    response = stream.get_final_message()
+                # Simpan seluruh blok (termasuk thinking & tool_use) agar percakapan bisa berlanjut.
+                self.messages.append({"role": "assistant", "content": response.content})
+                for key in totals:
+                    totals[key] += getattr(response.usage, key, 0) or 0
+                texts += [b.text for b in response.content if b.type == "text"]
+
+                if response.stop_reason == "refusal":
+                    raise RuntimeError("Claude menolak menjawab pertanyaan ini.")
+                calls = [b for b in response.content if b.type == "tool_use"]
+                if response.stop_reason != "tool_use" or not calls:
+                    break
+                results = []
+                for call in calls:
+                    info = web_tools.describe(call.name, call.input)
+                    self.web.append(info)
+                    yield {"tool": info}
+                    output = (web_tools.run_tool(call.name, call.input) if allow
+                              else "ERROR: akses internet dimatikan oleh pengguna.")
+                    results.append({"type": "tool_result", "tool_use_id": call.id, "content": output})
+                self.messages.append({"role": "user", "content": results})
+        except BaseException:
+            del self.messages[start:]   # pertanyaan gagal tidak masuk riwayat
+            raise
+
+        self.questions.append(question)
+        self.answer = "\n\n".join(t for t in texts if t.strip())
         self.cited = [ref for ref in dict.fromkeys(re.findall(r"\[(R\d+)\]", self.answer))
                       if ref in self.refs]
-        self.usage = response.usage
+        self.usage = SimpleNamespace(**totals)
 
-    def ask(self, question):
-        for text in self.stream(question):
-            print(text, end="", flush=True)
+    def ask(self, question, web=False):
+        for chunk in self.stream(question, web=web):
+            if isinstance(chunk, dict):
+                t = chunk["tool"]
+                print(f"\n[{'cari' if t['type'] == 'search' else 'buka'}: {t['label']}]", flush=True)
+            else:
+                print(chunk, end="", flush=True)
         print()
         if self.cited:
             print("\nSumber:")
@@ -183,6 +227,8 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     args = sys.argv[1:]
     model_id = "claude"
+    web = "--web" in args          # izinkan akses internet (web_tools.py)
+    args = [a for a in args if a != "--web"]
     if len(args) >= 2 and args[0] == "--model":
         model_id, args = args[1], args[2:]
     claude_ids = [m["id"] for m in CHAT_MODELS if m["provider"] == "anthropic"]
@@ -196,7 +242,7 @@ def main():
     print(f"Perpustakaan dimuat: {lib.count} item. Model: {lib.model}.")
 
     if args:
-        lib.ask(" ".join(args))
+        lib.ask(" ".join(args), web=web)
         return
 
     print("Ketik pertanyaan (kosong / 'keluar' untuk berhenti).\n")
@@ -209,7 +255,7 @@ def main():
             break
         print("\nAI> ", end="")
         try:
-            lib.ask(q)
+            lib.ask(q, web=web)
         except anthropic.AuthenticationError:
             print("API key tidak valid. Periksa isi file .env.")
             return
